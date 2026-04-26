@@ -102,13 +102,13 @@ export function HeroAwwwards() {
             </p>
             
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
-              <button className="group relative flex h-12 w-full sm:w-auto items-center justify-center gap-2 overflow-hidden rounded-full bg-white px-8 text-sm font-semibold text-black transition-all hover:scale-[0.98] active:scale-95 shadow-[0_0_40px_rgba(255,255,255,0.2)]">
+              <a href="/upload" className="group relative flex h-12 w-full sm:w-auto items-center justify-center gap-2 overflow-hidden rounded-full bg-white px-8 text-sm font-semibold text-black transition-all hover:scale-[0.98] active:scale-95 shadow-[0_0_40px_rgba(255,255,255,0.2)]">
                 <span>Start Audit</span>
                 <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
-              </button>
-              <button className="group relative flex h-12 w-full sm:w-auto items-center justify-center gap-2 rounded-full border border-white/10 bg-white/5 px-8 text-sm font-medium text-white transition-all hover:bg-white/10 active:scale-95 backdrop-blur-md shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
+              </a>
+              <a href="/diagnostics" className="group relative flex h-12 w-full sm:w-auto items-center justify-center gap-2 rounded-full border border-white/10 bg-white/5 px-8 text-sm font-medium text-white transition-all hover:bg-white/10 active:scale-95 backdrop-blur-md shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
                 <span className="font-mono text-[11px] uppercase tracking-wider text-zinc-400 group-hover:text-white transition-colors">View Data</span>
-              </button>
+              </a>
             </div>
             
             {/* High-end Minimal Data Metrics */}
