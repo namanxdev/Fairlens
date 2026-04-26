@@ -1,6 +1,6 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { motion, type Variants } from "framer-motion";
 import { ShieldCheck, Scale, Network, Database } from "lucide-react";
 import React from "react";
 import { AreaChart, Area, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, Radar, BarChart, Bar, Cell } from "recharts";
@@ -32,13 +32,28 @@ const complianceData = [
   { name: "NYC 144", score: 92 },
 ];
 
+type ChartTooltipPayload = {
+  color?: string;
+  name?: string;
+  value?: string | number;
+  payload?: {
+    name?: string;
+  };
+};
+
+type ChartTooltipProps = {
+  active?: boolean;
+  payload?: ChartTooltipPayload[];
+  label?: string | number;
+};
+
 // Custom Tooltip for premium look
-const CustomTooltip = ({ active, payload, label }: any) => {
+const CustomTooltip = ({ active, payload, label }: ChartTooltipProps) => {
   if (active && payload && payload.length) {
     return (
       <div className="rounded-lg border border-white/10 bg-[#060606]/90 p-3 shadow-xl backdrop-blur-md">
         <p className="mb-2 font-mono text-[10px] uppercase text-zinc-500">{label}</p>
-        {payload.map((entry: any, index: number) => (
+        {payload.map((entry, index) => (
           <div key={`item-${index}`} className="flex items-center gap-2">
             <div className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: entry.color || "#10b981" }} />
             <p className="font-mono text-sm font-medium text-white">
@@ -53,11 +68,11 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 };
 
 // Custom Tooltip for Bar Chart
-const BarTooltip = ({ active, payload }: any) => {
+const BarTooltip = ({ active, payload }: ChartTooltipProps) => {
   if (active && payload && payload.length) {
     return (
       <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-[#060606]/90 px-3 py-2 shadow-xl backdrop-blur-md">
-        <span className="font-mono text-[10px] uppercase text-zinc-500">{payload[0].payload.name}</span>
+        <span className="font-mono text-[10px] uppercase text-zinc-500">{payload[0].payload?.name}</span>
         <span className="font-mono text-sm text-emerald-400">{payload[0].value}%</span>
       </div>
     );
@@ -65,7 +80,7 @@ const BarTooltip = ({ active, payload }: any) => {
   return null;
 };
 
-const containerVariants = {
+const containerVariants: Variants = {
   hidden: { opacity: 0 },
   visible: {
     opacity: 1,
@@ -73,7 +88,7 @@ const containerVariants = {
   },
 };
 
-const itemVariants = {
+const itemVariants: Variants = {
   hidden: { opacity: 0, y: 20 },
   visible: { 
     opacity: 1, 
@@ -224,7 +239,7 @@ export function FeaturesBento() {
               <ResponsiveContainer width="100%" height="100%">
                 <RadarChart cx="50%" cy="50%" outerRadius="60%" data={intersectionalData}>
                   <PolarGrid stroke="rgba(255,255,255,0.05)" />
-                  <PolarAngleAxis dataKey="subject" tick={{ fill: '#71717a', fontSize: 10, fontFamily: 'monospace', textAnchor: 'middle', textTransform: 'uppercase' }} />
+                  <PolarAngleAxis dataKey="subject" tick={{ fill: '#71717a', fontSize: 10, fontFamily: 'monospace', textAnchor: 'middle' }} />
                   <Radar name="Baseline" dataKey="Baseline" stroke="#3f3f46" strokeWidth={1} fill="#3f3f46" fillOpacity={0.1} />
                   <Radar name="Scanned Model" dataKey="Scanned" stroke="#10b981" strokeWidth={2} fill="#10b981" fillOpacity={0.3} />
                   <Tooltip content={<CustomTooltip />} />

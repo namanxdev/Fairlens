@@ -1,37 +1,343 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { 
-  BarChart, 
-  Bar, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
   ResponsiveContainer,
   ScatterChart,
   Scatter,
-  ZAxis
+  ZAxis,
+  Cell,
 } from "recharts";
 import { AlertCircle, ShieldAlert, Cpu } from "lucide-react";
+import {
+  DashboardStats,
+  FairnessAudit,
+  getCurrentAudit,
+  getDashboardStats,
+  getSavedAudit,
+  readLastAudit,
+  saveLastAudit,
+} from "@/lib/api";
 
-const parityData = [
-  { group: "Gender: Female", value: 0.82, threshold: 0.8 },
-  { group: "Gender: Male", value: 0.95, threshold: 0.8 },
-  { group: "Age: < 25", value: 0.65, threshold: 0.8 },
-  { group: "Age: 25-60", value: 0.91, threshold: 0.8 },
-  { group: "Age: > 60", value: 0.72, threshold: 0.8 },
-];
+const FAIRNESS_THRESHOLD = 0.8;
 
-const scatterData = [
-  { x: 10, y: 30, z: 200, name: 'Income' },
-  { x: 40, y: 50, z: 260, name: 'Credit Score' },
-  { x: 70, y: 20, z: 400, name: 'Age' },
-  { x: 90, y: 80, z: 100, name: 'Education' },
-  { x: 20, y: 70, z: 300, name: 'Employment Length' },
-];
+type ParityPoint = {
+  group: string;
+  value: number;
+};
+
+type ScatterPoint = {
+  x: number;
+  y: number;
+  z: number;
+  name: string;
+  impactLabel: string;
+};
+
+type Vulnerability = {
+  tone: "rose" | "amber";
+  title: string;
+  detail: string;
+};
+
+function titleize(value?: string) {
+  return (value || "audit").replace(/[_-]/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatRatio(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(2) : "--";
+}
+
+function formatPercent(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : "--";
+}
+
+function getPrimaryResult(audit: FairnessAudit | null) {
+  return [...(audit?.results || [])]
+    .reverse()
+    .find((result) => Object.keys(result.group_approval_rates || {}).length > 0);
+}
+
+function getWorstResult(audit: FairnessAudit | null) {
+  return (audit?.results || []).reduce<FairnessAudit["results"][number] | null>((worst, result) => {
+    if (typeof result.disparate_impact_ratio !== "number") {
+      return worst;
+    }
+    if (!worst || typeof worst.disparate_impact_ratio !== "number") {
+      return result;
+    }
+    return result.disparate_impact_ratio < worst.disparate_impact_ratio ? result : worst;
+  }, null);
+}
+
+function riskLabel(ratio?: number | null) {
+  if (typeof ratio !== "number") {
+    return "Pending";
+  }
+  if (ratio < 0.6) {
+    return "Critical";
+  }
+  if (ratio < FAIRNESS_THRESHOLD) {
+    return "High";
+  }
+  if (ratio < 0.9) {
+    return "Medium";
+  }
+  return "Low";
+}
+
+function metricStatus(value?: number | null) {
+  if (typeof value !== "number") {
+    return "Pending";
+  }
+  const absValue = Math.abs(value);
+  if (absValue <= 0.1) {
+    return "Pass";
+  }
+  if (absValue <= 0.2) {
+    return "Marginal";
+  }
+  return "Fail";
+}
+
+function primaryAttributeRows(dashboard: DashboardStats | null, audit: FairnessAudit | null) {
+  if (!dashboard?.by_attribute) {
+    return null;
+  }
+  if (audit?.sensitive_col && dashboard.by_attribute[audit.sensitive_col]) {
+    return dashboard.by_attribute[audit.sensitive_col];
+  }
+  return Object.values(dashboard.by_attribute)[0] || null;
+}
+
+function buildParityData(audit: FairnessAudit | null, dashboard: DashboardStats | null): ParityPoint[] {
+  const primaryResult = getPrimaryResult(audit);
+  const modelRates = primaryResult?.group_approval_rates || {};
+  const modelPoints = Object.entries(modelRates).map(([group, value]) => ({
+    group: `${titleize(audit?.sensitive_col)}: ${group}`,
+    value,
+  }));
+
+  if (modelPoints.length > 0) {
+    return modelPoints;
+  }
+
+  const rows = primaryAttributeRows(dashboard, audit);
+  return Object.entries(rows || {})
+    .filter(([, row]) => typeof row.approval_rate === "number")
+    .map(([group, row]) => ({
+      group: `${titleize(audit?.sensitive_col)}: ${group}`,
+      value: row.approval_rate || 0,
+    }));
+}
+
+function buildScatterData(dashboard: DashboardStats | null, audit: FairnessAudit | null): ScatterPoint[] {
+  const rows = primaryAttributeRows(dashboard, audit);
+  if (!rows) {
+    return [];
+  }
+
+  const featureBuckets = new Map<string, number[]>();
+  Object.values(rows).forEach((row) => {
+    Object.entries(row.numeric_averages || {}).forEach(([feature, value]) => {
+      if (typeof value !== "number" || !Number.isFinite(value)) {
+        return;
+      }
+      if (!featureBuckets.has(feature)) {
+        featureBuckets.set(feature, []);
+      }
+      featureBuckets.get(feature)?.push(value);
+    });
+  });
+
+  const visibleFeatureLimit = Math.min(Math.max(5, audit?.feature_cols?.length || 5), 12);
+  const featureRows = Array.from(featureBuckets.entries())
+    .filter(([, values]) => values.length > 0)
+    .slice(0, visibleFeatureLimit)
+    .map(([feature, values], index) => {
+      const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+      const spread = Math.max(...values) - Math.min(...values);
+      return { feature, average, spread, index };
+    });
+
+  if (featureRows.length === 0) {
+    return [];
+  }
+
+  const minAverage = Math.min(...featureRows.map((row) => row.average));
+  const maxAverage = Math.max(...featureRows.map((row) => row.average));
+  const maxSpread = Math.max(...featureRows.map((row) => row.spread), 1);
+
+  return featureRows.map((row) => {
+    const averageRange = maxAverage - minAverage || 1;
+    return {
+      x: ((row.index + 1) / (featureRows.length + 1)) * 100,
+      y: ((row.average - minAverage) / averageRange) * 100,
+      z: 40 + (row.spread / maxSpread) * 360,
+      name: row.feature,
+      impactLabel: row.spread.toFixed(3),
+    };
+  });
+}
+
+function buildVulnerabilities(
+  audit: FairnessAudit | null,
+  dashboard: DashboardStats | null,
+  loadError: string | null,
+): Vulnerability[] {
+  if (loadError) {
+    return [{ tone: "rose", title: "Audit connection failed", detail: loadError }];
+  }
+
+  if (!audit) {
+    return [{
+      tone: "amber",
+      title: "No audit loaded",
+      detail: "Upload a dataset to populate live diagnostics.",
+    }];
+  }
+
+  const vulnerabilities: Vulnerability[] = [];
+  const byAttribute = dashboard?.by_attribute || {};
+  Object.entries(dashboard?.legal_flags || {}).forEach(([attribute, flag]) => {
+    if (flag !== "FAIL") {
+      return;
+    }
+    const rows = byAttribute[attribute] || {};
+    const ranked = Object.entries(rows)
+      .filter(([, row]) => typeof row.approval_rate === "number")
+      .sort(([, a], [, b]) => (a.approval_rate || 0) - (b.approval_rate || 0));
+    const lowest = ranked[0];
+    const highest = ranked[ranked.length - 1];
+    vulnerabilities.push({
+      tone: "rose",
+      title: `${titleize(attribute)} 80% rule failure`,
+      detail: lowest && highest
+        ? `${lowest[0]} approval is ${formatPercent(lowest[1].approval_rate)} vs ${highest[0]} at ${formatPercent(highest[1].approval_rate)}.`
+        : `Disparate impact ratio is ${formatRatio(dashboard?.di_ratios?.[attribute])}.`,
+    });
+  });
+
+  audit.results.forEach((result) => {
+    if (result.legal_pass) {
+      return;
+    }
+    vulnerabilities.push({
+      tone: vulnerabilities.length === 0 ? "rose" : "amber",
+      title: `${result.model} disparate impact`,
+      detail: `DI ratio ${formatRatio(result.disparate_impact_ratio)} is below the 80% rule threshold.`,
+    });
+  });
+
+  if (vulnerabilities.length === 0) {
+    return [{
+      tone: "amber",
+      title: "No active 80% rule failure",
+      detail: "The latest audit metrics did not flag a protected-class failure.",
+    }];
+  }
+
+  return vulnerabilities.slice(0, 2);
+}
+
+function vulnerabilityClassNames(tone: Vulnerability["tone"]) {
+  if (tone === "rose") {
+    return {
+      item: "flex items-start gap-3 bg-rose-500/5 p-3 rounded border border-rose-500/10",
+      icon: "text-rose-400 shrink-0 mt-0.5",
+      title: "text-xs text-rose-200",
+    };
+  }
+
+  return {
+    item: "flex items-start gap-3 bg-amber-500/5 p-3 rounded border border-amber-500/10",
+    icon: "text-amber-400 shrink-0 mt-0.5",
+    title: "text-xs text-amber-200",
+  };
+}
 
 export default function DiagnosticsPage() {
+  const [audit, setAudit] = useState<FairnessAudit | null>(null);
+  const [dashboard, setDashboard] = useState<DashboardStats | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAudit() {
+      const cachedAudit = readLastAudit();
+      if (cachedAudit) {
+        setAudit(cachedAudit);
+      }
+
+      try {
+        let latestAudit: FairnessAudit;
+        try {
+          latestAudit = await getCurrentAudit();
+        } catch (currentAuditError) {
+          if (!cachedAudit?.audit_id) {
+            throw currentAuditError;
+          }
+          latestAudit = await getSavedAudit(cachedAudit.audit_id);
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        setAudit(latestAudit);
+        saveLastAudit(latestAudit);
+        setLoadError(null);
+
+        if (latestAudit.sensitive_col) {
+          try {
+            const stats = await getDashboardStats([latestAudit.sensitive_col]);
+            if (!cancelled) {
+              setDashboard(stats);
+            }
+          } catch {
+            if (!cancelled) {
+              setDashboard(null);
+            }
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAudit(null);
+          setDashboard(null);
+          setLoadError(error instanceof Error ? error.message : "Could not load audit data.");
+        }
+      }
+    }
+
+    loadAudit();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const worstResult = useMemo(() => getWorstResult(audit), [audit]);
+  const parityData = useMemo(() => buildParityData(audit, dashboard), [audit, dashboard]);
+  const scatterData = useMemo(() => buildScatterData(dashboard, audit), [dashboard, audit]);
+  const vulnerabilities = useMemo(
+    () => buildVulnerabilities(audit, dashboard, loadError),
+    [audit, dashboard, loadError],
+  );
+
+  const overallRisk = riskLabel(worstResult?.disparate_impact_ratio);
+  const diPass = typeof worstResult?.disparate_impact_ratio === "number"
+    ? worstResult.disparate_impact_ratio >= FAIRNESS_THRESHOLD
+    : false;
+  const demographicParity = metricStatus(worstResult?.demographic_parity_difference);
+  const equalizedOdds = metricStatus(worstResult?.equalized_odds_difference);
+
   return (
     <div className="min-h-screen bg-[#060606] text-zinc-300 font-sans selection:bg-emerald-500/30 px-6 py-24 flex justify-center">
       <div className="w-full max-w-7xl space-y-12">
@@ -44,7 +350,7 @@ export default function DiagnosticsPage() {
               Real-time audit of automated decisioning models. Detecting disparate impact and representation flaws.
             </p>
           </div>
-          <motion.button 
+          <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.98 }}
             className="px-6 py-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] uppercase tracking-widest font-mono font-bold rounded flex items-center gap-2 whitespace-nowrap self-start md:self-auto"
@@ -64,20 +370,22 @@ export default function DiagnosticsPage() {
                 <div className="space-y-6 relative z-10">
                     <div className="space-y-1">
                         <span className="text-[10px] uppercase tracking-widest font-mono text-zinc-500">Overall Bias Score</span>
-                        <div className="text-5xl font-light text-rose-400">Critical</div>
+                        <div className="text-5xl font-light text-rose-400">{overallRisk}</div>
                     </div>
                     <div className="space-y-3">
                         <div className="flex justify-between border-b border-white/5 pb-2">
                             <span className="text-xs text-zinc-400">Disparate Impact ratio</span>
-                            <span className="text-xs font-mono text-rose-400">0.72 &lt; 0.8 (Fail)</span>
+                            <span className={`text-xs font-mono ${diPass ? "text-emerald-400" : "text-rose-400"}`}>
+                              {formatRatio(worstResult?.disparate_impact_ratio)} {diPass ? ">=" : "<"} 0.8 ({diPass ? "Pass" : "Fail"})
+                            </span>
                         </div>
                         <div className="flex justify-between border-b border-white/5 pb-2">
                             <span className="text-xs text-zinc-400">Demographic Parity</span>
-                            <span className="text-xs font-mono text-amber-400">Marginal</span>
+                            <span className="text-xs font-mono text-amber-400">{demographicParity}</span>
                         </div>
                         <div className="flex justify-between pb-2">
                             <span className="text-xs text-zinc-400">Equal Opportunity</span>
-                            <span className="text-xs font-mono text-emerald-400">Pass</span>
+                            <span className="text-xs font-mono text-emerald-400">{equalizedOdds}</span>
                         </div>
                     </div>
                 </div>
@@ -86,20 +394,18 @@ export default function DiagnosticsPage() {
              <div className="border border-white/5 bg-[#0a0a0a] p-6 rounded-lg">
                 <span className="text-[10px] uppercase tracking-widest font-mono text-zinc-500 block mb-4">Detected Vulnerabilities</span>
                 <ul className="space-y-3">
-                    <li className="flex items-start gap-3 bg-rose-500/5 p-3 rounded border border-rose-500/10">
-                        <AlertCircle size={16} className="text-rose-400 shrink-0 mt-0.5" />
-                        <div className="space-y-1">
-                            <p className="text-xs text-rose-200">Age &lt; 25 discrimination</p>
-                            <p className="text-[10px] text-zinc-500">Loan approval rate is 35% lower than baseline.</p>
-                        </div>
-                    </li>
-                    <li className="flex items-start gap-3 bg-amber-500/5 p-3 rounded border border-amber-500/10">
-                        <AlertCircle size={16} className="text-amber-400 shrink-0 mt-0.5" />
-                        <div className="space-y-1">
-                            <p className="text-xs text-amber-200">Proxy Feature Risk</p>
-                            <p className="text-[10px] text-zinc-500">'Zip Code' highly correlates with protected class.</p>
-                        </div>
-                    </li>
+                    {vulnerabilities.map((item) => {
+                      const classes = vulnerabilityClassNames(item.tone);
+                      return (
+                        <li key={`${item.title}-${item.detail}`} className={classes.item}>
+                          <AlertCircle size={16} className={classes.icon} />
+                          <div className="space-y-1">
+                              <p className={classes.title}>{item.title}</p>
+                              <p className="text-[10px] text-zinc-500">{item.detail}</p>
+                          </div>
+                        </li>
+                      );
+                    })}
                 </ul>
              </div>
           </div>
@@ -112,26 +418,28 @@ export default function DiagnosticsPage() {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={parityData} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff05" />
-                    <XAxis 
-                      dataKey="group" 
-                      axisLine={false} 
-                      tickLine={false} 
-                      tick={{ fill: '#71717a', fontSize: 10, fontFamily: 'monospace' }} 
-                      dy={10} 
+                    <XAxis
+                      dataKey="group"
+                      axisLine={false}
+                      tickLine={false}
+                      tick={{ fill: "#71717a", fontSize: 10, fontFamily: "monospace" }}
+                      dy={10}
                     />
-                    <YAxis 
-                      axisLine={false} 
-                      tickLine={false} 
-                      tick={{ fill: '#71717a', fontSize: 10, fontFamily: 'monospace' }} 
+                    <YAxis
+                      domain={[0, 1]}
+                      axisLine={false}
+                      tickLine={false}
+                      tick={{ fill: "#71717a", fontSize: 10, fontFamily: "monospace" }}
                     />
-                    <Tooltip 
-                      cursor={{fill: '#ffffff02'}}
-                      contentStyle={{ backgroundColor: '#000', border: '1px solid #ffffff10', borderRadius: '4px', fontSize: '12px' }}
-                      itemStyle={{ color: '#fff' }}
+                    <Tooltip
+                      cursor={{fill: "#ffffff02"}}
+                      contentStyle={{ backgroundColor: "#000", border: "1px solid #ffffff10", borderRadius: "4px", fontSize: "12px" }}
+                      itemStyle={{ color: "#fff" }}
+                      formatter={(value) => formatPercent(Number(value))}
                     />
                     <Bar dataKey="value" radius={[2, 2, 0, 0]}>
                       {parityData.map((entry, index) => (
-                        <cell key={`cell-${index}`} fill={entry.value < 0.8 ? '#fb7185' : '#34d399'} />
+                        <Cell key={`cell-${index}`} fill={entry.value < FAIRNESS_THRESHOLD ? "#fb7185" : "#34d399"} />
                       ))}
                     </Bar>
                   </BarChart>
@@ -149,17 +457,17 @@ export default function DiagnosticsPage() {
                 <ResponsiveContainer width="100%" height="100%">
                   <ScatterChart margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#ffffff05" />
-                    <XAxis type="number" dataKey="x" axisLine={false} tickLine={false} tick={{ fill: '#71717a', fontSize: 10 }} />
-                    <YAxis type="number" dataKey="y" axisLine={false} tickLine={false} tick={{ fill: '#71717a', fontSize: 10 }} />
+                    <XAxis type="number" dataKey="x" domain={[0, 100]} axisLine={false} tickLine={false} tick={{ fill: "#71717a", fontSize: 10 }} />
+                    <YAxis type="number" dataKey="y" domain={[0, 100]} axisLine={false} tickLine={false} tick={{ fill: "#71717a", fontSize: 10 }} />
                     <ZAxis type="number" dataKey="z" range={[20, 400]} />
-                    <Tooltip 
-                       cursor={{strokeDasharray: '3 3', stroke: '#ffffff20'}}
+                    <Tooltip
+                       cursor={{strokeDasharray: "3 3", stroke: "#ffffff20"}}
                        content={({ active, payload }) => {
                         if (active && payload && payload.length) {
                           return (
                             <div className="bg-black border border-white/10 p-2 text-xs rounded shadow-xl">
                               <p className="text-emerald-400 font-mono">{`${payload[0].payload.name}`}</p>
-                              <p className="text-zinc-400 mt-1">Impact: {payload[0].value}</p>
+                              <p className="text-zinc-400 mt-1">Impact: {payload[0].payload.impactLabel}</p>
                             </div>
                           );
                         }
