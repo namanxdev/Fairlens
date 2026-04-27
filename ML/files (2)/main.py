@@ -6,6 +6,7 @@ User only needs to tell us: target_col + sensitive_col.
 
 import io
 import json
+from pathlib import Path
 import pandas as pd
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +47,13 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Remediation-Summary", "Content-Disposition"],
 )
+
+UPLOAD_DIR = Path(__file__).with_name("uploaded_datasets")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+def _uploaded_dataset_path(audit_id: str) -> Path:
+    return UPLOAD_DIR / f"{audit_id}.csv"
 
 
 def _user_id_from_headers(
@@ -190,6 +198,11 @@ async def upload_dataset(
         audit_id = create_audit(user_id, domain, file.filename, target_col, sensitive_col)
     except DatabaseOperationError as e:
         raise _db_http_error(e)
+
+    try:
+        _uploaded_dataset_path(audit_id).write_bytes(contents)
+    except OSError:
+        pass
 
     try:
         result = train_pipeline(df, target_col, sensitive_col, domain)
@@ -607,14 +620,14 @@ def export_csv(
 @app.post("/remediate/{audit_id}")
 async def remediate(
     audit_id: str,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     authorization: str | None = Header(None),
     x_user_id: str | None = Header(None, alias="X-User-Id"),
 ):
     """
-    Generate debiased dataset. Accepts the original CSV again because
-    raw data is never persisted in memory across server restarts.
-    Models are loaded from DB if not already in memory.
+    Generate a debiased dataset for an audit.
+    Uses the uploaded CSV when provided, otherwise falls back to the
+    in-memory raw dataframe or the server-side saved dataset copy.
     """
     user_id = _user_id_from_headers(authorization, x_user_id)
 
@@ -628,12 +641,39 @@ async def remediate(
     # Verify ownership
     _load_owned_audit(audit_id, user_id)
 
-    # Parse uploaded CSV
-    contents = await file.read()
-    try:
-        df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
-    except Exception as e:
-        raise HTTPException(400, detail=f"Could not parse CSV: {e}")
+    df: pd.DataFrame | None = None
+    if file is not None:
+        contents = await file.read()
+        try:
+            df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
+        except Exception as e:
+            raise HTTPException(400, detail=f"Could not parse CSV: {e}")
+        try:
+            _uploaded_dataset_path(audit_id).write_bytes(contents)
+        except OSError:
+            pass
+    elif _state.get("audit_id") == audit_id and _state.get("raw_df") is not None:
+        df = _state["raw_df"].copy()
+    else:
+        saved_dataset_path = _uploaded_dataset_path(audit_id)
+        if saved_dataset_path.exists():
+            try:
+                df = pd.read_csv(saved_dataset_path)
+            except Exception as e:
+                raise HTTPException(400, detail=f"Could not parse saved CSV: {e}")
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Original dataset not available for this audit. Re-upload the CSV once, then retry.",
+            )
+
+    required_cols = list(_state.get("feature_cols") or []) + [_state["sensitive_col"]]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise HTTPException(
+            status_code=400,
+            detail=f"CSV is missing required columns for remediation: {missing_cols}",
+        )
 
     # Store raw_df in state so get_debiased_predictions() works
     _state["raw_df"] = df.copy()

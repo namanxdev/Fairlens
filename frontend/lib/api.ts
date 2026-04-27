@@ -276,7 +276,7 @@ export function getCsvExportUrl(auditId: string) {
 
 export async function remediateAndDownload(
   auditId: string,
-  originalFile: File
+  originalFile?: File | null
 ): Promise<{
   blob: Blob;
   filename: string;
@@ -287,15 +287,19 @@ export async function remediateAndDownload(
     debiased_di_ratio: number;
   } | null;
 }> {
-  const formData = new FormData();
-  formData.append("file", originalFile);
-
-  const response = await fetch(`${API_BASE_URL}/remediate/${auditId}`, {
+  const requestOptions: RequestInit = {
     method: "POST",
     headers: { "X-User-Id": getClientUserId() },
-    body: formData,
     cache: "no-store",
-  });
+  };
+
+  if (originalFile) {
+    const formData = new FormData();
+    formData.append("file", originalFile);
+    requestOptions.body = formData;
+  }
+
+  const response = await fetch(`${API_BASE_URL}/remediate/${auditId}`, requestOptions);
 
   if (!response.ok) {
     throw new Error(await parseError(response));

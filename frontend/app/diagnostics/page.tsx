@@ -258,18 +258,18 @@ export default function DiagnosticsPage() {
   const [downloadSummary, setDownloadSummary] = useState<any>(null);
   const [bannerVisible, setBannerVisible] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [filePickerMode, setFilePickerMode] = useState<"upload" | "download" | null>(null);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleDownloadDebiasedClick = async () => {
-    if (!audit?.audit_id || !uploadedFile) {
-      alert("Please upload a dataset first so we can remediate it.");
-      return;
+  const runDebiasedDownload = async (sourceFile?: File | null) => {
+    if (!audit?.audit_id) {
+      throw new Error("Please upload a dataset first so we can remediate it.");
     }
+
     setIsDownloading(true);
-    setLoadError(null);
     try {
-      const { blob, filename, summary } = await remediateAndDownload(audit.audit_id, uploadedFile);
+      const { blob, filename, summary } = await remediateAndDownload(audit.audit_id, sourceFile);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -279,16 +279,44 @@ export default function DiagnosticsPage() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       
+      if (sourceFile) {
+        setUploadedFile(sourceFile);
+      }
       setDownloadSummary(summary);
       setBannerVisible(true);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Download failed");
     } finally {
       setIsDownloading(false);
     }
   };
 
+  const handleDownloadDebiasedClick = async () => {
+    if (!audit?.audit_id) {
+      alert("Please upload a dataset first so we can remediate it.");
+      return;
+    }
+
+    setLoadError(null);
+    try {
+      await runDebiasedDownload(uploadedFile);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Download failed";
+      const needsOriginalCsv =
+        !uploadedFile &&
+        /original dataset not available|raw uploaded data is not available|re-upload the csv/i.test(message);
+
+      if (needsOriginalCsv) {
+        setLoadError("Choose the original CSV once so we can generate the debiased dataset.");
+        setFilePickerMode("download");
+        fileInputRef.current?.click();
+        return;
+      }
+
+      setLoadError(message);
+    }
+  };
+
   const handleRemediateClick = () => {
+    setFilePickerMode("upload");
     fileInputRef.current?.click();
   };
 
@@ -296,9 +324,16 @@ export default function DiagnosticsPage() {
     const file = e.target.files?.[0];
     if (!file || !audit) return;
 
-    setIsUploading(true);
+    const mode = filePickerMode || "upload";
+
     setLoadError(null);
     try {
+      if (mode === "download") {
+        await runDebiasedDownload(file);
+        return;
+      }
+
+      setIsUploading(true);
       const newAudit = await uploadDataset(file, {
         targetCol: audit.target_col,
         sensitiveCol: audit.sensitive_col,
@@ -312,9 +347,10 @@ export default function DiagnosticsPage() {
         setDashboard(stats);
       }
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Upload failed");
+      setLoadError(err instanceof Error ? err.message : mode === "download" ? "Download failed" : "Upload failed");
     } finally {
       setIsUploading(false);
+      setFilePickerMode(null);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
@@ -406,10 +442,10 @@ export default function DiagnosticsPage() {
           <div className="flex items-center gap-3">
             <motion.button
               onClick={handleDownloadDebiasedClick}
-              disabled={isDownloading || !audit || !uploadedFile}
+              disabled={isDownloading || !audit}
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.98 }}
-              className={`px-6 py-3 bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 text-[10px] uppercase tracking-widest font-mono font-bold rounded flex items-center gap-2 whitespace-nowrap self-start md:self-auto ${isDownloading || !audit || !uploadedFile ? "opacity-50 cursor-not-allowed" : ""}`}
+              className={`px-6 py-3 bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 text-[10px] uppercase tracking-widest font-mono font-bold rounded flex items-center gap-2 whitespace-nowrap self-start md:self-auto ${isDownloading || !audit ? "opacity-50 cursor-not-allowed" : ""}`}
             >
               <Cpu size={14} className={isDownloading ? "animate-spin" : ""} />
               {isDownloading ? "Downloading..." : "Download Debiased Dataset"}
@@ -444,7 +480,7 @@ export default function DiagnosticsPage() {
             <div>
               <h3 className="text-emerald-400 font-bold text-sm uppercase tracking-widest font-mono mb-1">Debiased Dataset Ready</h3>
               <p className="text-emerald-200/80 text-sm">
-                Upload this file using "Remediate Model" to see the Before vs After comparison.
+                Re-upload this exported file with "Remediate Model" if you want to audit the debiased version side by side.
               </p>
             </div>
             <div className="bg-black/40 p-3 rounded border border-emerald-500/20 text-xs font-mono text-zinc-300 space-y-1">
