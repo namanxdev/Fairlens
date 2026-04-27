@@ -3,10 +3,16 @@
 import { useState } from "react";
 import { UploadCloud, Database, FileText, CheckCircle2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { uploadDataset } from "@/lib/api";
 
 export default function UploadPage() {
   const [isHovering, setIsHovering] = useState(false);
   const [file, setFile] = useState<File | null>(null);
+  const [columns, setColumns] = useState<string[]>([]);
+  const [targetCol, setTargetCol] = useState("");
+  const [sensitiveCol, setSensitiveCol] = useState("");
+  const [domain, setDomain] = useState("custom");
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "processing" | "complete">("idle");
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -32,13 +38,83 @@ export default function UploadPage() {
     }
   };
 
-  const handleFileSelect = (selectedFile: File) => {
+  const parseCsvHeader = (headerLine: string) => {
+    const headers: string[] = [];
+    let value = "";
+    let inQuotes = false;
+
+    for (let index = 0; index < headerLine.length; index += 1) {
+      const char = headerLine[index];
+      const nextChar = headerLine[index + 1];
+
+      if (char === '"' && nextChar === '"') {
+        value += '"';
+        index += 1;
+      } else if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === "," && !inQuotes) {
+        headers.push(value.trim());
+        value = "";
+      } else {
+        value += char;
+      }
+    }
+
+    headers.push(value.trim());
+    return headers.filter(Boolean);
+  };
+
+  const handleFileSelect = async (selectedFile: File) => {
     setFile(selectedFile);
+    setColumns([]);
+    setTargetCol("");
+    setSensitiveCol("");
+    setUploadError(null);
+    setStatus("idle");
+
+    if (!selectedFile.name.toLowerCase().endsWith(".csv")) {
+      setUploadError("The ML API accepts CSV files only.");
+      return;
+    }
+
+    try {
+      const preview = await selectedFile.slice(0, 64 * 1024).text();
+      const firstLine = preview.split(/\r?\n/).find((line) => line.trim().length > 0);
+      const headerColumns = firstLine ? parseCsvHeader(firstLine) : [];
+
+      if (headerColumns.length < 2) {
+        setUploadError("Could not read at least two CSV columns.");
+        return;
+      }
+
+      setColumns(headerColumns);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not read CSV headers";
+      setUploadError(message);
+    }
+  };
+
+  const runAudit = async () => {
+    if (!file || !targetCol || !sensitiveCol) {
+      setUploadError("Select both target and sensitive columns.");
+      return;
+    }
+    if (targetCol === sensitiveCol) {
+      setUploadError("Target and sensitive columns must be different.");
+      return;
+    }
+
+    setUploadError(null);
     setStatus("processing");
-    // Simulate processing
-    setTimeout(() => {
+
+    try {
+      await uploadDataset(file, { targetCol, sensitiveCol, domain });
       setStatus("complete");
-    }, 4000);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Upload failed";
+      setUploadError(message);
+      setStatus("idle");
+    }
   };
 
   return (
@@ -84,26 +160,91 @@ export default function UploadPage() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
-                  className="flex flex-col items-center gap-6 z-10"
+                  className="flex flex-col items-center gap-6 z-10 w-full px-6"
                 >
                   <div className="w-20 h-20 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-zinc-400 group-hover:text-emerald-400 group-hover:scale-110 transition-all duration-500">
                     <UploadCloud strokeWidth={1} size={32} />
                   </div>
                   <div className="text-center space-y-2">
-                    <p className="text-xl text-zinc-200 font-light">Drag & drop your file here</p>
-                    <p className="text-sm text-zinc-500 font-mono">.csv, .json, .parquet up to 500MB</p>
+                    <p className="text-xl text-zinc-200 font-light">
+                      {file ? file.name : "Drag & drop your file here"}
+                    </p>
+                    <p className="text-sm text-zinc-500 font-mono">.csv up to 500MB</p>
                   </div>
+
+                  {columns.length > 0 && (
+                    <div className="grid w-full max-w-2xl grid-cols-1 gap-3 md:grid-cols-3">
+                      <label className="space-y-2 text-left">
+                        <span className="block text-[10px] uppercase tracking-widest font-mono text-zinc-500">Target</span>
+                        <select
+                          value={targetCol}
+                          onChange={(event) => setTargetCol(event.target.value)}
+                          className="h-10 w-full rounded border border-white/10 bg-black/60 px-3 text-xs text-zinc-200 outline-none focus:border-emerald-500/50"
+                        >
+                          <option value="">Select column</option>
+                          {columns.map((column) => (
+                            <option key={column} value={column}>{column}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-left">
+                        <span className="block text-[10px] uppercase tracking-widest font-mono text-zinc-500">Sensitive</span>
+                        <select
+                          value={sensitiveCol}
+                          onChange={(event) => setSensitiveCol(event.target.value)}
+                          className="h-10 w-full rounded border border-white/10 bg-black/60 px-3 text-xs text-zinc-200 outline-none focus:border-emerald-500/50"
+                        >
+                          <option value="">Select column</option>
+                          {columns.map((column) => (
+                            <option key={column} value={column}>{column}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="space-y-2 text-left">
+                        <span className="block text-[10px] uppercase tracking-widest font-mono text-zinc-500">Domain</span>
+                        <select
+                          value={domain}
+                          onChange={(event) => setDomain(event.target.value)}
+                          className="h-10 w-full rounded border border-white/10 bg-black/60 px-3 text-xs text-zinc-200 outline-none focus:border-emerald-500/50"
+                        >
+                          <option value="custom">Custom</option>
+                          <option value="jobs">Jobs</option>
+                          <option value="banking">Banking</option>
+                          <option value="healthcare">Healthcare</option>
+                          <option value="education">Education</option>
+                        </select>
+                      </label>
+                    </div>
+                  )}
+
+                  {uploadError && (
+                    <p className="max-w-2xl text-center text-xs text-rose-300">{uploadError}</p>
+                  )}
+
                   <label className="relative overflow-hidden cursor-pointer group/btn mt-4">
                     <input
                       type="file"
                       className="hidden"
-                      accept=".csv,.json,.parquet"
+                      accept=".csv"
                       onChange={handleFileInput}
                     />
                     <div className="px-8 py-3 bg-white text-black text-sm font-medium rounded-full shadow-[0_0_40px_-10px_rgba(255,255,255,0.3)] hover:scale-[1.02] transition-transform flex items-center gap-2">
-                      <span className="relative z-10 uppercase tracking-wider text-[11px] font-bold">Browse Files</span>
+                      <span className="relative z-10 uppercase tracking-wider text-[11px] font-bold">
+                        {file ? "Change File" : "Browse Files"}
+                      </span>
                     </div>
                   </label>
+
+                  {columns.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={runAudit}
+                      disabled={!targetCol || !sensitiveCol || targetCol === sensitiveCol}
+                      className="px-8 py-3 bg-emerald-500 disabled:bg-white/10 disabled:text-zinc-600 hover:bg-emerald-400 text-black text-sm font-medium rounded-full hover:scale-[1.02] transition-transform flex items-center gap-2 uppercase tracking-wider text-[11px] font-bold"
+                    >
+                      Run Audit
+                    </button>
+                  )}
                 </motion.div>
               )}
 
