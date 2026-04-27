@@ -225,11 +225,11 @@ export function getStatus() {
   return apiRequest<StatusResponse>("/status");
 }
 
-export function getDashboardStats(sensitiveCols: string[]) {
+export function getDashboardStats(sensitiveCols: string[], useDebiased: boolean = false) {
   return apiRequest<DashboardStats>("/dashboard-stats", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sensitive_cols: sensitiveCols }),
+    body: JSON.stringify({ sensitive_cols: sensitiveCols, use_debiased: useDebiased }),
   });
 }
 

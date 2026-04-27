@@ -359,7 +359,7 @@ def dashboard_stats(body: DashboardStatsRequest):
         raise HTTPException(status_code=400, detail="No dataset loaded. POST /upload first.")
 
     try:
-        return compute_group_stats(_state["raw_df"], _state["target_col"], body.sensitive_cols)
+        return compute_group_stats(_state["raw_df"], _state["target_col"], body.sensitive_cols, use_debiased=body.use_debiased)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -723,7 +723,11 @@ async def remediate(
     }
 
     dataset_name = _state.get("dataset_name") or "dataset.csv"
-    out_filename = f"debiased_{dataset_name}"
+    # Strip any existing "debiased_" prefixes so re-running never stacks them
+    clean_name = dataset_name
+    while clean_name.startswith("debiased_"):
+        clean_name = clean_name[len("debiased_"):]
+    out_filename = f"debiased_{clean_name}"
 
     return Response(
         content=export_df.to_csv(index=False),

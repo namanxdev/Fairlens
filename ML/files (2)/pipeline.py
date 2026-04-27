@@ -430,7 +430,7 @@ def _round_or_none(value, digits: int = 3):
 
 
 def compute_group_stats(df: pd.DataFrame, target_col: str,
-                        sensitive_cols: list) -> dict:
+                        sensitive_cols: list, use_debiased: bool = False) -> dict:
     """
     Computes per-attribute and intersectional dashboard stats.
 
@@ -475,7 +475,14 @@ def compute_group_stats(df: pd.DataFrame, target_col: str,
 
                 X_all = scaler.transform(encoded_input.values.astype(float))
                 target_binary = pd.Series(np.nan, index=work.index, dtype=float)
-                target_binary.loc[valid_mask] = _state["baseline"].predict(X_all).astype(float)
+                
+                if use_debiased and _state.get("threshold_model") is not None:
+                    # Need sensitive features for threshold_model
+                    sensitive_col = _state["sensitive_col"]
+                    A_all, _, _, _ = encode_sensitive(work.loc[valid_mask, sensitive_col])
+                    target_binary.loc[valid_mask] = _state["threshold_model"].predict(X_all, sensitive_features=A_all).astype(float)
+                else:
+                    target_binary.loc[valid_mask] = _state["baseline"].predict(X_all).astype(float)
         except Exception:
             target_binary = None
 

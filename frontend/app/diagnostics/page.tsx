@@ -177,6 +177,7 @@ function buildVulnerabilities(
   audit: FairnessAudit | null,
   dashboard: DashboardStats | null,
   loadError: string | null,
+  viewMode: "raw" | "debiased" = "raw"
 ): Vulnerability[] {
   if (loadError) {
     return [{ tone: "rose", title: "Audit connection failed", detail: loadError }];
@@ -211,7 +212,11 @@ function buildVulnerabilities(
     });
   });
 
-  audit.results.forEach((result) => {
+  const relevantResults = viewMode === "debiased" 
+    ? audit.results.filter(r => r.model.includes("Threshold cal."))
+    : audit.results;
+
+  relevantResults.forEach((result) => {
     if (result.legal_pass) {
       return;
     }
@@ -259,6 +264,8 @@ export default function DiagnosticsPage() {
   const [bannerVisible, setBannerVisible] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [filePickerMode, setFilePickerMode] = useState<"upload" | "download" | null>(null);
+  
+  const [viewMode, setViewMode] = useState<"raw" | "debiased">("raw");
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -320,6 +327,20 @@ export default function DiagnosticsPage() {
     fileInputRef.current?.click();
   };
 
+  const handleToggleView = async () => {
+    if (!audit?.audit_id || !audit?.sensitive_col) return;
+    setIsUploading(true);
+    try {
+      const stats = await getDashboardStats([audit.sensitive_col], viewMode === "raw");
+      setDashboard(stats);
+      setViewMode(viewMode === "raw" ? "debiased" : "raw");
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Failed to switch views");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !audit) return;
@@ -343,8 +364,9 @@ export default function DiagnosticsPage() {
       setUploadedFile(file);
       saveLastAudit(newAudit);
       if (newAudit.sensitive_col) {
-        const stats = await getDashboardStats([newAudit.sensitive_col]);
+        const stats = await getDashboardStats([newAudit.sensitive_col], false);
         setDashboard(stats);
+        setViewMode("raw");
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : mode === "download" ? "Download failed" : "Upload failed");
@@ -387,7 +409,7 @@ export default function DiagnosticsPage() {
 
         if (latestAudit.sensitive_col) {
           try {
-            const stats = await getDashboardStats([latestAudit.sensitive_col]);
+            const stats = await getDashboardStats([latestAudit.sensitive_col], viewMode === "debiased");
             if (!cancelled) {
               setDashboard(stats);
             }
@@ -412,20 +434,28 @@ export default function DiagnosticsPage() {
     };
   }, []);
 
-  const worstResult = useMemo(() => getWorstResult(audit), [audit]);
+  const targetResult = useMemo(() => {
+    if (!audit) return null;
+    if (viewMode === "raw") {
+      return getWorstResult(audit);
+    }
+    // Return Threshold cal. model if debiased mode
+    return audit.results.find(r => r.model.includes("Threshold cal.")) || getWorstResult(audit);
+  }, [audit, viewMode]);
+
   const parityData = useMemo(() => buildParityData(audit, dashboard), [audit, dashboard]);
   const scatterData = useMemo(() => buildScatterData(dashboard, audit), [dashboard, audit]);
   const vulnerabilities = useMemo(
-    () => buildVulnerabilities(audit, dashboard, loadError),
-    [audit, dashboard, loadError],
+    () => buildVulnerabilities(audit, dashboard, loadError, viewMode),
+    [audit, dashboard, loadError, viewMode],
   );
 
-  const overallRisk = riskLabel(worstResult?.disparate_impact_ratio);
-  const diPass = typeof worstResult?.disparate_impact_ratio === "number"
-    ? worstResult.disparate_impact_ratio >= FAIRNESS_THRESHOLD
+  const overallRisk = riskLabel(targetResult?.disparate_impact_ratio);
+  const diPass = typeof targetResult?.disparate_impact_ratio === "number"
+    ? targetResult.disparate_impact_ratio >= FAIRNESS_THRESHOLD
     : false;
-  const demographicParity = metricStatus(worstResult?.demographic_parity_difference);
-  const equalizedOdds = metricStatus(worstResult?.equalized_odds_difference);
+  const demographicParity = metricStatus(targetResult?.demographic_parity_difference);
+  const equalizedOdds = metricStatus(targetResult?.equalized_odds_difference);
 
   return (
     <div className="min-h-screen bg-[#060606] text-zinc-300 font-sans selection:bg-emerald-500/30 px-6 py-24 flex justify-center">
@@ -458,8 +488,19 @@ export default function DiagnosticsPage() {
               whileTap={{ scale: 0.98 }}
               className={`px-6 py-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] uppercase tracking-widest font-mono font-bold rounded flex items-center gap-2 whitespace-nowrap self-start md:self-auto ${isUploading || !audit ? "opacity-50 cursor-not-allowed" : ""}`}
             >
-              <Cpu size={14} className={isUploading ? "animate-spin" : ""} />
+              <Cpu size={14} className={isUploading ? "animate-pulse text-emerald-300" : ""} />
               {isUploading ? "Uploading..." : "Remediate Model"}
+            </motion.button>
+            
+            <motion.button
+              onClick={handleToggleView}
+              disabled={isUploading || !audit}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.98 }}
+              className={`px-6 py-3 bg-blue-500/10 border border-blue-500/30 text-blue-400 text-[10px] uppercase tracking-widest font-mono font-bold rounded flex items-center gap-2 whitespace-nowrap self-start md:self-auto ${isUploading || !audit ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              <Cpu size={14} className={isUploading ? "animate-pulse text-blue-300" : ""} />
+              {isUploading ? "Loading..." : viewMode === "raw" ? "View Debiased Model" : "View Raw Model"}
             </motion.button>
             <input
               type="file"
@@ -509,7 +550,7 @@ export default function DiagnosticsPage() {
                         <div className="flex justify-between border-b border-white/5 pb-2">
                             <span className="text-xs text-zinc-400">Disparate Impact ratio</span>
                             <span className={`text-xs font-mono ${diPass ? "text-emerald-400" : "text-rose-400"}`}>
-                              {formatRatio(worstResult?.disparate_impact_ratio)} {diPass ? ">=" : "<"} 0.8 ({diPass ? "Pass" : "Fail"})
+                              {formatRatio(targetResult?.disparate_impact_ratio)} {diPass ? ">=" : "<"} 0.8 ({diPass ? "Pass" : "Fail"})
                             </span>
                         </div>
                         <div className="flex justify-between border-b border-white/5 pb-2">

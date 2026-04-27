@@ -15,6 +15,7 @@ class DashboardStatsRequest(BaseModel):
         examples=[["gender", "age", "ethnicity"]],
         description="Sensitive attributes to break down independently.",
     )
+    use_debiased: bool = Field(False)
 
 
 class CompareRequest(BaseModel):
