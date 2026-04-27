@@ -273,3 +273,40 @@ export function getReportExportUrl(auditId: string) {
 export function getCsvExportUrl(auditId: string) {
   return `${API_BASE_URL}/export/csv/${auditId}`;
 }
+
+export async function remediateAndDownload(
+  auditId: string,
+  originalFile: File
+): Promise<{
+  blob: Blob;
+  filename: string;
+  summary: {
+    rows_changed: number;
+    pct_changed: number;
+    original_di_ratio: number;
+    debiased_di_ratio: number;
+  } | null;
+}> {
+  const formData = new FormData();
+  formData.append("file", originalFile);
+
+  const response = await fetch(`${API_BASE_URL}/remediate/${auditId}`, {
+    method: "POST",
+    headers: { "X-User-Id": getClientUserId() },
+    body: formData,
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const filename = disposition.match(/filename="?([^"]+)"?/)?.[1] || "debiased_dataset.csv";
+  
+  const summaryRaw = response.headers.get("X-Remediation-Summary");
+  const summary = summaryRaw ? JSON.parse(summaryRaw) : null;
+
+  return { blob, filename, summary };
+}

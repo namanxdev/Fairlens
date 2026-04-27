@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { motion } from "framer-motion";
 import {
   BarChart,
@@ -14,6 +14,7 @@ import {
   Scatter,
   ZAxis,
   Cell,
+  LabelList,
 } from "recharts";
 import { AlertCircle, ShieldAlert, Cpu } from "lucide-react";
 import {
@@ -24,6 +25,8 @@ import {
   getSavedAudit,
   readLastAudit,
   saveLastAudit,
+  uploadDataset,
+  remediateAndDownload,
 } from "@/lib/api";
 
 const FAIRNESS_THRESHOLD = 0.8;
@@ -57,12 +60,6 @@ function formatRatio(value?: number | null) {
 
 function formatPercent(value?: number | null) {
   return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : "--";
-}
-
-function getPrimaryResult(audit: FairnessAudit | null) {
-  return [...(audit?.results || [])]
-    .reverse()
-    .find((result) => Object.keys(result.group_approval_rates || {}).length > 0);
 }
 
 function getWorstResult(audit: FairnessAudit | null) {
@@ -118,17 +115,6 @@ function primaryAttributeRows(dashboard: DashboardStats | null, audit: FairnessA
 }
 
 function buildParityData(audit: FairnessAudit | null, dashboard: DashboardStats | null): ParityPoint[] {
-  const primaryResult = getPrimaryResult(audit);
-  const modelRates = primaryResult?.group_approval_rates || {};
-  const modelPoints = Object.entries(modelRates).map(([group, value]) => ({
-    group: `${titleize(audit?.sensitive_col)}: ${group}`,
-    value,
-  }));
-
-  if (modelPoints.length > 0) {
-    return modelPoints;
-  }
-
   const rows = primaryAttributeRows(dashboard, audit);
   return Object.entries(rows || {})
     .filter(([, row]) => typeof row.approval_rate === "number")
@@ -267,6 +253,73 @@ export default function DiagnosticsPage() {
   const [audit, setAudit] = useState<FairnessAudit | null>(null);
   const [dashboard, setDashboard] = useState<DashboardStats | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadSummary, setDownloadSummary] = useState<any>(null);
+  const [bannerVisible, setBannerVisible] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleDownloadDebiasedClick = async () => {
+    if (!audit?.audit_id || !uploadedFile) {
+      alert("Please upload a dataset first so we can remediate it.");
+      return;
+    }
+    setIsDownloading(true);
+    setLoadError(null);
+    try {
+      const { blob, filename, summary } = await remediateAndDownload(audit.audit_id, uploadedFile);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      setDownloadSummary(summary);
+      setBannerVisible(true);
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Download failed");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const handleRemediateClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !audit) return;
+
+    setIsUploading(true);
+    setLoadError(null);
+    try {
+      const newAudit = await uploadDataset(file, {
+        targetCol: audit.target_col,
+        sensitiveCol: audit.sensitive_col,
+        domain: audit.domain || "custom",
+      });
+      setAudit(newAudit);
+      setUploadedFile(file);
+      saveLastAudit(newAudit);
+      if (newAudit.sensitive_col) {
+        const stats = await getDashboardStats([newAudit.sensitive_col]);
+        setDashboard(stats);
+      }
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -350,15 +403,59 @@ export default function DiagnosticsPage() {
               Real-time audit of automated decisioning models. Detecting disparate impact and representation flaws.
             </p>
           </div>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.98 }}
-            className="px-6 py-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] uppercase tracking-widest font-mono font-bold rounded flex items-center gap-2 whitespace-nowrap self-start md:self-auto"
-          >
-            <Cpu size={14} />
-            Remediate Model
-          </motion.button>
+          <div className="flex items-center gap-3">
+            <motion.button
+              onClick={handleDownloadDebiasedClick}
+              disabled={isDownloading || !audit || !uploadedFile}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.98 }}
+              className={`px-6 py-3 bg-indigo-500/10 border border-indigo-500/30 text-indigo-400 text-[10px] uppercase tracking-widest font-mono font-bold rounded flex items-center gap-2 whitespace-nowrap self-start md:self-auto ${isDownloading || !audit || !uploadedFile ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              <Cpu size={14} className={isDownloading ? "animate-spin" : ""} />
+              {isDownloading ? "Downloading..." : "Download Debiased Dataset"}
+            </motion.button>
+
+            <motion.button
+              onClick={handleRemediateClick}
+              disabled={isUploading || !audit}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.98 }}
+              className={`px-6 py-3 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] uppercase tracking-widest font-mono font-bold rounded flex items-center gap-2 whitespace-nowrap self-start md:self-auto ${isUploading || !audit ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              <Cpu size={14} className={isUploading ? "animate-spin" : ""} />
+              {isUploading ? "Uploading..." : "Remediate Model"}
+            </motion.button>
+            <input
+              type="file"
+              accept=".csv"
+              ref={fileInputRef}
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </div>
         </header>
+
+        {bannerVisible && downloadSummary && (
+          <motion.div 
+            initial={{ opacity: 0, y: -10 }} 
+            animate={{ opacity: 1, y: 0 }} 
+            className="w-full bg-emerald-500/10 border border-emerald-500/30 rounded p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4"
+          >
+            <div>
+              <h3 className="text-emerald-400 font-bold text-sm uppercase tracking-widest font-mono mb-1">Debiased Dataset Ready</h3>
+              <p className="text-emerald-200/80 text-sm">
+                Upload this file using "Remediate Model" to see the Before vs After comparison.
+              </p>
+            </div>
+            <div className="bg-black/40 p-3 rounded border border-emerald-500/20 text-xs font-mono text-zinc-300 space-y-1">
+              <p><span className="text-zinc-500">Rows changed:</span> <span className="text-emerald-400">{downloadSummary.rows_changed}</span> ({downloadSummary.pct_changed}%)</p>
+              <p><span className="text-zinc-500">DI ratio improved:</span> <span className="text-rose-400">{downloadSummary.original_di_ratio}</span> → <span className="text-emerald-400">{downloadSummary.debiased_di_ratio}</span></p>
+            </div>
+            <button onClick={() => setBannerVisible(false)} className="text-emerald-500/50 hover:text-emerald-500 absolute top-4 right-4 md:static">
+              ✕
+            </button>
+          </motion.div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Summary Stats */}
@@ -426,7 +523,7 @@ export default function DiagnosticsPage() {
                       dy={10}
                     />
                     <YAxis
-                      domain={[0, 1]}
+                      domain={[0, Math.max(0.1, ...parityData.map(d => d.value)) * 1.2]}
                       axisLine={false}
                       tickLine={false}
                       tick={{ fill: "#71717a", fontSize: 10, fontFamily: "monospace" }}
@@ -441,6 +538,12 @@ export default function DiagnosticsPage() {
                       {parityData.map((entry, index) => (
                         <Cell key={`cell-${index}`} fill={entry.value < FAIRNESS_THRESHOLD ? "#fb7185" : "#34d399"} />
                       ))}
+                      <LabelList
+                        dataKey="value"
+                        position="top"
+                        formatter={(v: any) => (v !== undefined && v !== null) ? `${Math.round(Number(v) * 100)}%` : ""}
+                        style={{ fill: "#a1a1aa", fontSize: 10, fontFamily: "monospace" }}
+                      />
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>

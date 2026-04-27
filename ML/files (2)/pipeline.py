@@ -453,7 +453,35 @@ def compute_group_stats(df: pd.DataFrame, target_col: str,
         raise ValueError(f"Sensitive column(s) not found: {missing}")
 
     work = df.copy()
-    work["_target_binary"] = _coerce_target_to_binary(work[target_col])
+
+    target_binary = None
+    if _state.get("trained") and _state.get("baseline") is not None:
+        try:
+            feature_cols = _state["feature_cols"]
+            scaler = _state["scaler"]
+            le_map = _state["label_encoders"] or {}
+
+            model_input = work[feature_cols].copy()
+            valid_mask = model_input.notna().all(axis=1)
+            for col, enc in le_map.items():
+                if col in model_input.columns:
+                    valid_mask &= model_input[col].astype(str).isin(enc.classes_)
+
+            if valid_mask.any():
+                encoded_input = model_input.loc[valid_mask].copy()
+                for col, enc in le_map.items():
+                    if col in encoded_input.columns:
+                        encoded_input[col] = enc.transform(encoded_input[col].astype(str))
+
+                X_all = scaler.transform(encoded_input.values.astype(float))
+                target_binary = pd.Series(np.nan, index=work.index, dtype=float)
+                target_binary.loc[valid_mask] = _state["baseline"].predict(X_all).astype(float)
+        except Exception:
+            target_binary = None
+
+    if target_binary is None:
+        target_binary = _coerce_target_to_binary(work[target_col])
+    work["_target_binary"] = target_binary
     valid_sensitive_cols = [col for col in sensitive_cols if col in work.columns]
 
     numeric_feature_cols = [
