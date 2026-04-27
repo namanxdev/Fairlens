@@ -432,7 +432,7 @@ export default function DiagnosticsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [viewMode]);
 
   const targetResult = useMemo(() => {
     if (!audit) return null;
@@ -450,9 +450,13 @@ export default function DiagnosticsPage() {
     [audit, dashboard, loadError, viewMode],
   );
 
-  const overallRisk = riskLabel(targetResult?.disparate_impact_ratio);
-  const diPass = typeof targetResult?.disparate_impact_ratio === "number"
-    ? targetResult.disparate_impact_ratio >= FAIRNESS_THRESHOLD
+  const mainDiRatio = audit?.sensitive_col && dashboard?.di_ratios?.[audit.sensitive_col]
+    ? dashboard.di_ratios[audit.sensitive_col]
+    : targetResult?.disparate_impact_ratio;
+
+  const overallRisk = riskLabel(mainDiRatio);
+  const diPass = typeof mainDiRatio === "number"
+    ? mainDiRatio >= FAIRNESS_THRESHOLD
     : false;
   const demographicParity = metricStatus(targetResult?.demographic_parity_difference);
   const equalizedOdds = metricStatus(targetResult?.equalized_odds_difference);
@@ -521,7 +525,7 @@ export default function DiagnosticsPage() {
             <div>
               <h3 className="text-emerald-400 font-bold text-sm uppercase tracking-widest font-mono mb-1">Debiased Dataset Ready</h3>
               <p className="text-emerald-200/80 text-sm">
-                Re-upload this exported file with "Remediate Model" if you want to audit the debiased version side by side.
+                Re-upload this exported file with &quot;Remediate Model&quot; if you want to audit the debiased version side by side.
               </p>
             </div>
             <div className="bg-black/40 p-3 rounded border border-emerald-500/20 text-xs font-mono text-zinc-300 space-y-1">
@@ -544,13 +548,13 @@ export default function DiagnosticsPage() {
                 <div className="space-y-6 relative z-10">
                     <div className="space-y-1">
                         <span className="text-[10px] uppercase tracking-widest font-mono text-zinc-500">Overall Bias Score</span>
-                        <div className="text-5xl font-light text-rose-400">{overallRisk}</div>
+                        <div className={`text-5xl font-light ${diPass ? "text-emerald-400" : "text-rose-400"}`}>{overallRisk}</div>
                     </div>
                     <div className="space-y-3">
                         <div className="flex justify-between border-b border-white/5 pb-2">
                             <span className="text-xs text-zinc-400">Disparate Impact ratio</span>
                             <span className={`text-xs font-mono ${diPass ? "text-emerald-400" : "text-rose-400"}`}>
-                              {formatRatio(targetResult?.disparate_impact_ratio)} {diPass ? ">=" : "<"} 0.8 ({diPass ? "Pass" : "Fail"})
+                              {formatRatio(mainDiRatio)} {diPass ? ">=" : "<"} 0.8 ({diPass ? "Pass" : "Fail"})
                             </span>
                         </div>
                         <div className="flex justify-between border-b border-white/5 pb-2">
