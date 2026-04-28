@@ -1,6 +1,6 @@
 import re
 
-with open("/home/shrey/Fairlens/ML/files (2)/main.py", "r") as f:
+with open("/home/shrey/Fairlens/ML/files/main.py", "r") as f:
     content = f.read()
 
 new_func = """@app.post("/remediate/{audit_id}")
@@ -97,7 +97,7 @@ async def remediate(
 parts = content.split('@app.get("/remediate/{audit_id}")')
 if len(parts) > 1:
     new_content = parts[0] + new_func + "\n"
-    with open("/home/shrey/Fairlens/ML/files (2)/main.py", "w") as f:
+    with open("/home/shrey/Fairlens/ML/files/main.py", "w") as f:
         f.write(new_content)
     print("Patched main.py")
 else:
