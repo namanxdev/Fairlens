@@ -1,6 +1,6 @@
 import re
 
-with open("/home/shrey/Fairlens/ML/files (2)/main.py", "r") as f:
+with open("/home/shrey/Fairlens/ML/files/main.py", "r") as f:
     content = f.read()
 
 # Replace the GET /remediate route to POST
@@ -102,7 +102,7 @@ async def remediate(
     )"""
 
     content = content.replace(old_func, new_func)
-    with open("/home/shrey/Fairlens/ML/files (2)/main.py", "w") as f:
+    with open("/home/shrey/Fairlens/ML/files/main.py", "w") as f:
         f.write(content)
     print("Patched main.py")
 else:
