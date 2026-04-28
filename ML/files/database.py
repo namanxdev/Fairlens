@@ -1,8 +1,9 @@
 """
 database.py — persistent audit sessions for the fairness API.
 
-Uses SQLite by default. To move to PostgreSQL later, set FAIRNESS_DATABASE_URL
-to a SQLAlchemy-compatible connection string.
+PostgreSQL only. Connection string is read from the DATABASE_URL env var (or
+FAIRNESS_DATABASE_URL as fallback). Load a .env file by setting one up at
+<repo-root>/backend/.env with DATABASE_URL=postgresql+psycopg2://...
 """
 
 from __future__ import annotations
@@ -13,6 +14,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from dotenv import load_dotenv
+
+# Load .env from <repo-root>/backend/.env — works regardless of cwd
+_env_file = Path(__file__).resolve().parent.parent.parent / "backend" / ".env"
+load_dotenv(dotenv_path=_env_file, override=False)
 
 from sqlalchemy import (
     Boolean,
@@ -27,18 +34,20 @@ from sqlalchemy import (
     delete,
     select,
 )
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 
 
-DB_PATH = Path(__file__).with_name("fairness_audits.db")
-DATABASE_URL = os.getenv("FAIRNESS_DATABASE_URL", f"sqlite:///{DB_PATH}")
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
-    future=True,
+_raw_url = (
+    os.getenv("DATABASE_URL")
+    or os.getenv("FAIRNESS_DATABASE_URL")
+    or "postgresql+psycopg2://postgres:postgres@localhost:5432/fairlens"
 )
+# asyncpg is async-only; swap it for psycopg2 which works with sync SQLAlchemy.
+DATABASE_URL = _raw_url.replace("+asyncpg", "+psycopg2")
+
+engine = create_engine(DATABASE_URL, future=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 Base = declarative_base()
 _INIT_ERROR: str | None = None
@@ -55,12 +64,14 @@ class DatabaseOperationError(RuntimeError):
 class Audit(Base):
     __tablename__ = "audits"
 
-    id = Column(String(36), primary_key=True, default=_uuid)
+    id = Column(PGUUID(as_uuid=False), primary_key=True, default=_uuid)
     user_id = Column(String, nullable=False, index=True, default="anonymous")
     domain = Column(String, nullable=False, default="custom")
     dataset_name = Column(String, nullable=False)
     target_col = Column(String, nullable=False)
     sensitive_col = Column(String, nullable=False)
+    fairness_config = Column(JSON, nullable=False, default=dict)
+    verified_di_ratio_after_retraining = Column(Float, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     status = Column(String, nullable=False, default="processing")
 
@@ -80,8 +91,8 @@ class Audit(Base):
 class AuditResult(Base):
     __tablename__ = "audit_results"
 
-    id = Column(String(36), primary_key=True, default=_uuid)
-    audit_id = Column(String(36), ForeignKey("audits.id"), nullable=False, index=True)
+    id = Column(PGUUID(as_uuid=False), primary_key=True, default=_uuid)
+    audit_id = Column(PGUUID(as_uuid=False), ForeignKey("audits.id"), nullable=False, index=True)
     model_name = Column(String, nullable=False)
     group_rates = Column(JSON, nullable=False, default=dict)
     di_ratio = Column(Float, nullable=True)
@@ -96,8 +107,8 @@ class AuditResult(Base):
 class SavedModel(Base):
     __tablename__ = "saved_models"
 
-    id = Column(String(36), primary_key=True, default=_uuid)
-    audit_id = Column(String(36), ForeignKey("audits.id"), nullable=False, index=True)
+    id = Column(PGUUID(as_uuid=False), primary_key=True, default=_uuid)
+    audit_id = Column(PGUUID(as_uuid=False), ForeignKey("audits.id"), nullable=False, index=True)
     model_blob = Column(LargeBinary, nullable=False)
     feature_cols = Column(JSON, nullable=False, default=list)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -141,7 +152,14 @@ def _result_to_dict(row: AuditResult) -> dict:
     }
 
 
-def create_audit(user_id, domain, dataset_name, target_col, sensitive_col) -> str:
+def create_audit(
+    user_id,
+    domain,
+    dataset_name,
+    target_col,
+    sensitive_col,
+    fairness_config: dict | None = None,
+) -> str:
     """Insert an audit row and return its UUID string."""
     _ensure_ready()
     audit_id = _uuid()
@@ -154,6 +172,7 @@ def create_audit(user_id, domain, dataset_name, target_col, sensitive_col) -> st
                 dataset_name=dataset_name,
                 target_col=target_col,
                 sensitive_col=sensitive_col,
+                fairness_config=fairness_config or {},
                 status="processing",
             )
             session.add(audit)
@@ -174,6 +193,21 @@ def set_audit_status(audit_id: str, status: str) -> None:
                 session.commit()
     except SQLAlchemyError as exc:
         raise DatabaseOperationError(f"Database set_audit_status failed: {exc}") from exc
+
+
+def save_remediation_summary(audit_id: str, verified_di_ratio_after_retraining: float | None) -> None:
+    """Persist the round-trip verification score for the remediated dataset."""
+    _ensure_ready()
+    try:
+        with SessionLocal() as session:
+            audit = session.get(Audit, audit_id)
+            if audit:
+                audit.verified_di_ratio_after_retraining = _as_float(
+                    verified_di_ratio_after_retraining
+                )
+                session.commit()
+    except SQLAlchemyError as exc:
+        raise DatabaseOperationError(f"Database save_remediation_summary failed: {exc}") from exc
 
 
 def save_audit_results(audit_id, results_list):
@@ -215,14 +249,20 @@ def save_models(audit_id, state_dict):
         "baseline": state_dict.get("baseline"),
         "reweighted_model": state_dict.get("reweighted_model"),
         "threshold_model": state_dict.get("threshold_model"),
+        "preprocessor": state_dict.get("preprocessor"),
         "feature_cols": state_dict.get("feature_cols"),
         "target_col": state_dict.get("target_col"),
         "sensitive_col": state_dict.get("sensitive_col"),
         "sensitive_groups": state_dict.get("sensitive_groups"),
         "sensitive_encoder": state_dict.get("sensitive_encoder"),
+        "sensitive_info": state_dict.get("sensitive_info"),
+        "target_info": state_dict.get("target_info"),
+        "positive_label": state_dict.get("positive_label"),
         "scaler": state_dict.get("scaler"),
         "label_encoders": state_dict.get("label_encoders") or {},
         "domain": state_dict.get("domain"),
+        "fairness_criterion": state_dict.get("fairness_criterion"),
+        "difference_bound": state_dict.get("difference_bound"),
     }
     try:
         blob = pickle.dumps(model_state)
@@ -274,6 +314,8 @@ def load_audit(audit_id) -> dict:
                 "sensitive_col": audit.sensitive_col,
                 "created_at": audit.created_at.isoformat(),
                 "status": audit.status,
+                "fairness_config": audit.fairness_config or {},
+                "verified_di_ratio_after_retraining": audit.verified_di_ratio_after_retraining,
                 "groups_found": groups_found,
                 "feature_cols": feature_cols,
                 "results": results,
@@ -299,6 +341,7 @@ def load_models_into_state(audit_id):
             "baseline": model_state.get("baseline"),
             "reweighted_model": model_state.get("reweighted_model"),
             "threshold_model": model_state.get("threshold_model"),
+            "preprocessor": model_state.get("preprocessor"),
             "X_test": None,
             "y_test": None,
             "A_test": None,
@@ -308,6 +351,9 @@ def load_models_into_state(audit_id):
             "sensitive_col": model_state.get("sensitive_col"),
             "sensitive_groups": model_state.get("sensitive_groups"),
             "sensitive_encoder": model_state.get("sensitive_encoder"),
+            "sensitive_info": model_state.get("sensitive_info") or model_state.get("sensitive_encoder"),
+            "target_info": model_state.get("target_info"),
+            "positive_label": model_state.get("positive_label"),
             "scaler": model_state.get("scaler"),
             "label_encoders": model_state.get("label_encoders") or {},
             "trained": True,
@@ -319,6 +365,8 @@ def load_models_into_state(audit_id):
             "audit_result": audit_result,
             "dataset_name": audit_result.get("dataset_name"),
             "user_id": audit_result.get("user_id"),
+            "fairness_criterion": model_state.get("fairness_criterion", "equal_opportunity"),
+            "difference_bound": model_state.get("difference_bound", 0.05),
         })
         return audit_result
     except SQLAlchemyError as exc:
@@ -353,6 +401,8 @@ def list_audits(user_id) -> list:
                     "sensitive_col": audit.sensitive_col,
                     "created_at": audit.created_at.isoformat(),
                     "status": audit.status,
+                    "fairness_config": audit.fairness_config or {},
+                    "verified_di_ratio_after_retraining": audit.verified_di_ratio_after_retraining,
                     "models_saved": bool(audit.saved_model),
                     "results_count": len(audit.results),
                 }

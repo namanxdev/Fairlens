@@ -26,6 +26,8 @@ export type FairnessAudit = {
   status?: string;
   groups_found?: string[];
   feature_cols?: string[];
+  fairness_config?: Record<string, unknown>;
+  verified_di_ratio_after_retraining?: number | null;
   results: AuditModelResult[];
 };
 

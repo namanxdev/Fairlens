@@ -32,9 +32,9 @@ export function Navbar() {
         <Link href="/login" className="text-sm font-medium text-zinc-400 hover:text-zinc-100 transition-colors duration-200">
           Sign in
         </Link>
-        <button className="px-4 py-2 text-sm font-medium text-zinc-950 bg-emerald-500 rounded-md hover:bg-emerald-400 transition-all duration-300 ease-out active:scale-95">
+        <Link href="/upload" className="px-4 py-2 text-sm font-medium text-zinc-950 bg-emerald-500 rounded-md hover:bg-emerald-400 transition-all duration-300 ease-out active:scale-95">
           Start Audit
-        </button>
+        </Link>
       </div>
     </motion.nav>
   );

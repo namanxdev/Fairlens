@@ -212,9 +212,9 @@ function buildVulnerabilities(
     });
   });
 
-  const relevantResults = viewMode === "debiased" 
-    ? audit.results.filter(r => r.model.includes("Threshold cal."))
-    : audit.results;
+  const relevantResults = viewMode === "debiased"
+    ? audit.results.filter(r => r.model.toLowerCase().includes("fair in-processing") || r.model.toLowerCase().includes("stage 1"))
+    : audit.results.filter(r => r.model.toLowerCase().includes("baseline"));
 
   relevantResults.forEach((result) => {
     if (result.legal_pass) {
@@ -437,10 +437,16 @@ export default function DiagnosticsPage() {
   const targetResult = useMemo(() => {
     if (!audit) return null;
     if (viewMode === "raw") {
-      return getWorstResult(audit);
+      // Show unmodified baseline so users see the starting point.
+      return audit.results.find(r => r.model.toLowerCase().includes("baseline")) || getWorstResult(audit);
     }
-    // Return Threshold cal. model if debiased mode
-    return audit.results.find(r => r.model.includes("Threshold cal.")) || getWorstResult(audit);
+    // Show EG (Fair in-processing) — it improves demographic parity DI directly.
+    // ThresholdOptimizer targets TPR parity, which can worsen DI on some datasets.
+    return (
+      audit.results.find(r => r.model.toLowerCase().includes("fair in-processing") || r.model.toLowerCase().includes("stage 1")) ||
+      audit.results.find(r => r.model.toLowerCase().includes("threshold optimizer")) ||
+      getWorstResult(audit)
+    );
   }, [audit, viewMode]);
 
   const parityData = useMemo(() => buildParityData(audit, dashboard), [audit, dashboard]);
@@ -450,9 +456,10 @@ export default function DiagnosticsPage() {
     [audit, dashboard, loadError, viewMode],
   );
 
-  const mainDiRatio = audit?.sensitive_col && dashboard?.di_ratios?.[audit.sensitive_col]
-    ? dashboard.di_ratios[audit.sensitive_col]
-    : targetResult?.disparate_impact_ratio;
+  // Use model-prediction DI (changes with raw/debiased viewMode).
+  // dashboard.di_ratios is raw-data approval rate DI — shown in the bar chart already.
+  const mainDiRatio = targetResult?.disparate_impact_ratio
+    ?? (audit?.sensitive_col ? dashboard?.di_ratios?.[audit.sensitive_col] : undefined);
 
   const overallRisk = riskLabel(mainDiRatio);
   const diPass = typeof mainDiRatio === "number"
@@ -557,6 +564,14 @@ export default function DiagnosticsPage() {
                               {formatRatio(mainDiRatio)} {diPass ? ">=" : "<"} 0.8 ({diPass ? "Pass" : "Fail"})
                             </span>
                         </div>
+                        {typeof audit?.verified_di_ratio_after_retraining === "number" && (
+                          <div className="flex justify-between border-b border-white/5 pb-2">
+                            <span className="text-xs text-zinc-400">DI after remediation</span>
+                            <span className={`text-xs font-mono ${audit.verified_di_ratio_after_retraining >= FAIRNESS_THRESHOLD ? "text-emerald-400" : "text-rose-400"}`}>
+                              {formatRatio(audit.verified_di_ratio_after_retraining)} ({audit.verified_di_ratio_after_retraining >= FAIRNESS_THRESHOLD ? "Pass" : "Fail"})
+                            </span>
+                          </div>
+                        )}
                         <div className="flex justify-between border-b border-white/5 pb-2">
                             <span className="text-xs text-zinc-400">Demographic Parity</span>
                             <span className="text-xs font-mono text-amber-400">{demographicParity}</span>
