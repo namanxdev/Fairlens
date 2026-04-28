@@ -34,9 +34,15 @@ from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 DB_PATH = Path(__file__).with_name("fairness_audits.db")
 DATABASE_URL = os.getenv("FAIRNESS_DATABASE_URL", f"sqlite:///{DB_PATH}")
 
+# Fix Supabase/PostgreSQL URL issue (Supabase uses postgresql://, but SQLAlchemy often needs postgresql+psycopg2://)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+psycopg2://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
+
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
+    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
     future=True,
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
