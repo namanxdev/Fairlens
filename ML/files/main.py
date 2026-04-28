@@ -30,6 +30,9 @@ from database import (
 from llm_context import build_audit_context, build_compare_prompt
 from schemas import CompareRequest, DashboardStatsRequest
 
+from dotenv import load_dotenv
+load_dotenv()
+
 app = FastAPI(
     title="AI Fairness Auditor — Universal",
     description="""
